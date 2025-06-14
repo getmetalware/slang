@@ -9,12 +9,10 @@
 
 #include "slang/ast/ASTVisitor.h"
 #include "slang/ast/Compilation.h"
-#include "slang/ast/EvalContext.h"
 #include "slang/ast/SystemSubroutine.h"
 #include "slang/ast/expressions/MiscExpressions.h"
 #include "slang/ast/symbols/InstanceSymbols.h"
 #include "slang/ast/symbols/MemberSymbols.h"
-#include "slang/diagnostics/DeclarationsDiags.h"
 #include "slang/diagnostics/SysFuncsDiags.h"
 #include "slang/syntax/AllSyntax.h"
 
@@ -118,73 +116,9 @@ public:
     }
 };
 
-// Note: these are called "severity tasks" in the LRM but they
-// function as void-returning functions since they are callable
-// in constant functions.
-class SeverityTask : public SystemSubroutine {
+class FatalTask : public SystemTaskBase {
 public:
-    SeverityTask(const std::string& name, ElabSystemTaskKind taskKind) :
-        SystemSubroutine(name, SubroutineKind::Function), taskKind(taskKind) {}
-
-    bool allowEmptyArgument(size_t) const override { return true; }
-
-    const Type& checkArguments(const ASTContext& context, const Args& args, SourceRange,
-                               const Expression*) const override {
-        auto& comp = context.getCompilation();
-        if (!FmtHelpers::checkDisplayArgs(context, args))
-            return comp.getErrorType();
-
-        return comp.getVoidType();
-    }
-
-    ConstantValue eval(EvalContext& context, const Args& args, SourceRange sourceRange,
-                       const CallExpression::SystemCallInfo& callInfo) const final {
-        auto argCopy = args;
-        if (taskKind == ElabSystemTaskKind::Fatal && !args.empty())
-            argCopy = args.subspan(1);
-
-        auto str = FmtHelpers::formatDisplay(*callInfo.scope, context, argCopy);
-        if (!str)
-            return nullptr;
-
-        if (!str->empty())
-            str->insert(0, ": ");
-
-        DiagCode code;
-        switch (taskKind) {
-            case ElabSystemTaskKind::Fatal:
-                code = diag::FatalTask;
-                break;
-            case ElabSystemTaskKind::Error:
-                code = diag::ErrorTask;
-                break;
-            case ElabSystemTaskKind::Warning:
-                code = diag::WarningTask;
-                break;
-            case ElabSystemTaskKind::Info:
-                code = diag::InfoTask;
-                break;
-            default:
-                SLANG_UNREACHABLE;
-        }
-
-        context.addDiag(code, sourceRange).addStringAllowEmpty(*str);
-
-        // Return something valid here for info / warning; since this is a void-function or,
-        // equivalently, a task, nothing will inspect the result, but we only want it to not
-        // abort further evaluation for errors / fatals.
-        if (taskKind == ElabSystemTaskKind::Info || taskKind == ElabSystemTaskKind::Warning)
-            return ConstantValue::NullPlaceholder{};
-        return nullptr;
-    }
-
-private:
-    ElabSystemTaskKind taskKind;
-};
-
-class FatalTask : public SeverityTask {
-public:
-    FatalTask() : SeverityTask("$fatal", ElabSystemTaskKind::Fatal) {}
+    using SystemTaskBase::SystemTaskBase;
 
     bool allowEmptyArgument(size_t index) const final { return index != 0; }
 
@@ -794,6 +728,10 @@ void registerSystemTasks(Compilation& c) {
     REGISTER(MonitorTask, "$monitoro", LiteralBase::Octal);
     REGISTER(MonitorTask, "$monitorh", LiteralBase::Hex);
 
+    REGISTER(DisplayTask, "$error", LiteralBase::Decimal);
+    REGISTER(DisplayTask, "$warning", LiteralBase::Decimal);
+    REGISTER(DisplayTask, "$info", LiteralBase::Decimal);
+
 #undef REGISTER
 #define REGISTER(type, name) c.addSystemSubroutine(std::make_unique<type>(name))
     REGISTER(FileDisplayTask, "$fdisplay");
@@ -818,6 +756,8 @@ void registerSystemTasks(Compilation& c) {
     REGISTER(StringOutputTask, "$swriteo");
     REGISTER(StringOutputTask, "$swriteh");
 
+    REGISTER(FatalTask, "$fatal");
+
     REGISTER(FinishControlTask, "$finish");
     REGISTER(FinishControlTask, "$stop");
 
@@ -829,12 +769,6 @@ void registerSystemTasks(Compilation& c) {
     REGISTER(DumpPortsTask, "$dumpports");
 
     REGISTER(CastTask, "$cast");
-
-#undef REGISTER
-#define REGISTER(type, name, kind) c.addSystemSubroutine(std::make_unique<type>(name, kind))
-    REGISTER(SeverityTask, "$info", ElabSystemTaskKind::Info);
-    REGISTER(SeverityTask, "$warning", ElabSystemTaskKind::Warning);
-    REGISTER(SeverityTask, "$error", ElabSystemTaskKind::Error);
 
 #undef REGISTER
 
@@ -849,7 +783,6 @@ void registerSystemTasks(Compilation& c) {
                                                              std::vector<const Type*>{string_t}));
     c.addSystemSubroutine(std::make_unique<SdfAnnotateTask>());
     c.addSystemSubroutine(std::make_unique<StaticAssertTask>());
-    c.addSystemSubroutine(std::make_unique<FatalTask>());
 
 #define TASK(name, required, ...)                             \
     c.addSystemSubroutine(std::make_unique<SimpleSystemTask>( \
